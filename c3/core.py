@@ -211,14 +211,33 @@ class C3:
         self._request_nr = self._request_nr + 1
         return bytes_written
 
-    def _receive(self) -> tuple[bytearray, int, int]:
+    def _recv_exact(self, size: int) -> bytes:
+        """Read exactly `size` bytes from the socket.
+
+        A single socket.recv() call is not guaranteed to return all
+        requested bytes at once, even when the peer has already sent them;
+        this only reliably surfaced once bigdata replies started producing
+        payloads of several KB, larger than a single TCP segment/read.
+        """
+        buffer = bytearray()
+        while len(buffer) < size:
+            try:
+                chunk = self._sock.recv(size - len(buffer))
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            buffer += chunk
+        return bytes(buffer)
+
+    def _receive(self) -> tuple[bytearray, int, int, int]:
         # Get the first 5 bytes
         self._sock.settimeout(self.receive_timeout)
 
         header = bytes()
         for _ in range(self.receive_retries):
             try:
-                header = self._sock.recv(5)
+                header = self._recv_exact(5)
                 if len(header) == 5:
                     break
             except socket.timeout:
@@ -232,7 +251,7 @@ class C3:
                 header
             )
             # Get the optional message data, checksum (2 bytes) and end marker (1 byte)
-            payload = self._sock.recv(data_size + 3)
+            payload = self._recv_exact(data_size + 3)
             if data_size > 0:
                 # Process message in case data available
                 self.log.debug(
@@ -257,7 +276,39 @@ class C3:
                 f"Invalid response header received; expected 5 bytes, received {header}"
             )
 
-        return message, data_size, protocol_version
+        return message, data_size, protocol_version, received_command
+
+    def _receive_bigdata(self, prepare_body: bytearray) -> bytearray:
+        """Fetch a reply that didn't fit in a single message.
+
+        Triggered when a reply's command is C3_REPLY_BIGDATA_PREPARE instead
+        of the usual C3_REPLY_OK: `prepare_body` then carries the total
+        transfer size (little-endian uint16 at offset 1) instead of actual
+        data. The full payload is fetched by repeatedly sending
+        BIGDATA_CONTINUE with a 4-byte cursor (bytes received so far, as
+        little-endian uint32), until that total is reached, and closed out
+        with a BIGDATA_FREE command. Each BIGDATA_CONTINUE reply echoes the
+        requested cursor back as its first 4 bytes, followed by the next
+        chunk of data.
+
+        Reverse-engineered from a ZKAccess 3.5 <-> C3 packet capture; not
+        derived from any official protocol documentation, since none is
+        publicly available for this mechanism.
+        """
+        total_size = int.from_bytes(prepare_body[1:3], "little")
+        session_offset = 0 if self._session_less else 4
+        received = bytearray()
+
+        while len(received) < total_size:
+            cursor = len(received).to_bytes(4, "little")
+            self._send(consts.Command.BIGDATA_CONTINUE, list(cursor))
+            chunk, _, _, _ = self._receive()
+            received += chunk[session_offset + 4 :]
+
+        self._send(consts.Command.BIGDATA_FREE)
+        self._receive()  # Acknowledgement, no data expected
+
+        return received
 
     def _send_receive(
         self, command: consts.Command, data=None
@@ -269,13 +320,17 @@ class C3:
         try:
             bytes_written = self._send(command, data)
             if bytes_written > 0:
-                receive_data, bytes_received, _ = self._receive()
+                receive_data, bytes_received, _, received_command = self._receive()
                 if not self._session_less and bytes_received > 2:
                     session_offset = 4
                     session_id = (receive_data[1] << 8) + receive_data[0]
                     # msg_seq = (receive_data[3] << 8) + receive_data[2]
                     if self._session_id != session_id:
                         raise ValueError("Data received with invalid session ID")
+
+                if received_command == consts.C3_REPLY_BIGDATA_PREPARE:
+                    big_data = self._receive_bigdata(receive_data[session_offset:])
+                    return big_data, len(big_data)
         except BrokenPipeError as ex:
             self._connected = False
             raise ConnectionError(f"Unexpected connection end: {ex}") from ex
@@ -503,7 +558,7 @@ class C3:
             try:
                 bytes_written = self._send(consts.Command.CONNECT_SESSION, data)
                 if bytes_written > 0:
-                    receive_data, bytes_received, protocol_version = self._receive()
+                    receive_data, bytes_received, protocol_version, _ = self._receive()
                     if bytes_received > 2:
                         self._session_id = (receive_data[1] << 8) + receive_data[0]
                         self.log.debug(
@@ -529,7 +584,7 @@ class C3:
                         consts.Command.CONNECT_SESSION_LESS, data
                     )
                     if bytes_written > 0:
-                        _, _, protocol_version = self._receive()
+                        _, _, protocol_version, _ = self._receive()
                         self.log.debug("Connected without session")
                         self._session_less = True
                         self._protocol_version = protocol_version

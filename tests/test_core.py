@@ -58,6 +58,7 @@ def test_core_set_device_datetime():
             bytes.fromhex("d18a0000915255"),
             bytes.fromhex("aa01c80400"),
             bytes.fromhex("d18a000055"),
+            bytes(),
             bytes.fromhex("aa01c80400"),
             bytes.fromhex("d18a0003d15355"),
         ]
@@ -81,6 +82,7 @@ def test_core_get_device_param():
             bytes.fromhex("d18a0000915255"),
             bytes.fromhex("aa01c80400"),
             bytes.fromhex("d18a000055"),
+            bytes(),
         ]
 
         assert panel.connect() is True
@@ -166,6 +168,57 @@ def test_core_get_device_data_user(data_cfg_response_data):
         assert user_data[1]["EndTime"] == 20230303
 
 
+def test_core_get_device_data_user_bigdata(data_cfg_response_data):
+    """When a table's data doesn't fit a single reply, the panel replies to
+    GETDATA with command 0x0d (a 'prepare' reply carrying the total transfer
+    size) instead of the usual 0xC8 OK, and the actual data must be fetched
+    in chunks using two additional commands (0x0e to continue, 0x0f to
+    close out). This sequence isn't documented anywhere public; it was
+    reverse-engineered from a ZKAccess 3.5 <-> C3 packet capture.
+
+    This uses a small synthetic 2-record/2-field payload (not real device
+    data) split across two chunks at an arbitrary, mid-record boundary, to
+    prove chunk reassembly doesn't depend on chunks aligning with record
+    boundaries.
+    """
+    with mock.patch("socket.socket") as mock_socket:
+        panel = C3("localhost")
+        mock_socket.return_value.send.return_value = 8
+        mock_socket.return_value.recv.side_effect = [
+            bytes.fromhex("aa00c80400"),
+            bytes.fromhex("4ac70100ee3d55"),
+            bytes.fromhex("aa01c80200"),
+            bytes.fromhex("4ac797c355"),
+        ]
+
+        assert panel.connect() is True
+        mock_socket.return_value.recv.side_effect = [
+            bytes.fromhex("aa00c8b004"),
+            bytes.fromhex(data_cfg_response_data),
+            # GETDATA reply: command 0x0d, total size = 24 bytes
+            bytes.fromhex("aa010d1500"),
+            bytes.fromhex("4ac70300001800000018000000000000000000000080" "9655"),
+            # BIGDATA_CONTINUE reply #1: cursor echo 0 + first 15 bytes
+            bytes.fromhex("aa01c81700"),
+            bytes.fromhex("4ac70300000000000102020304570400000401000000045f4955"),
+            # BIGDATA_CONTINUE reply #2: cursor echo 15 + remaining 9 bytes
+            bytes.fromhex("aa01c81100"),
+            bytes.fromhex("4ac703000f000000ae08000004020000000e1555"),
+            # BIGDATA_FREE ack
+            bytes.fromhex("aa01c80400"),
+            bytes.fromhex("4ac703002e9155"),
+        ]
+
+        user_data = panel.get_device_data(
+            table_name="user", field_names=["CardNo", "Pin"]
+        )
+        assert len(user_data) == 2
+        assert user_data[0]["CardNo"] == 1111
+        assert user_data[0]["Pin"] == 1
+        assert user_data[1]["CardNo"] == 2222
+        assert user_data[1]["Pin"] == 2
+
+
 def test_core_connect_response_incomplete():
     with mock.patch("socket.socket") as mock_socket:
         panel = C3("localhost")
@@ -175,6 +228,7 @@ def test_core_connect_response_incomplete():
             bytes.fromhex("d18a0000915255"),
             bytes.fromhex("aa01c80400"),
             bytes.fromhex("d18a000055"),
+            bytes(),
         ]
 
         assert panel.connect() is True
@@ -182,6 +236,7 @@ def test_core_connect_response_incomplete():
         mock_socket.return_value.recv.side_effect = [
             bytes.fromhex("aa01c80800"),
             bytes.fromhex("d18a020012345678"),
+            bytes(),
         ]
         with pytest.raises(ValueError):
             panel.get_device_param([])

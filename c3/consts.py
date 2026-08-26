@@ -23,6 +23,8 @@ class Command(IntEnum):
     CONTROL = 0x05
     DATATABLE_CFG = 0x06
     GETDATA = 0x08
+    BIGDATA_CONTINUE = 0x0E
+    BIGDATA_FREE = 0x0F
     RTLOG_BINARY = 0x0B
     DISCOVER = 0x14
     CONNECT_SESSION = 0x76
@@ -31,6 +33,15 @@ class Command(IntEnum):
 
 C3_REPLY_OK = 0xC8
 C3_REPLY_ERROR = 0xC9
+# Reply to GETDATA (and presumably other read commands) when the requested
+# data does not fit in a single reply. Instead of the data itself, the body
+# carries the total transfer size (uint16, little-endian, at offset 1);
+# the client must then fetch it in chunks using BIGDATA_CONTINUE/BIGDATA_FREE.
+# Reverse-engineered from a ZKAccess 3.5 <-> C3 packet capture; the DLLs
+# shipped with the official PULL SDK reference this mechanism by name
+# (CMD_PREPARE_DATA/CMD_DATA/CMD_FREE_DATA) but its wire format isn't
+# documented anywhere we could find.
+C3_REPLY_BIGDATA_PREPARE = 0x0D
 
 
 Errors = {
