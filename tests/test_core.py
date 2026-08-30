@@ -4,8 +4,26 @@ from unittest import mock
 
 import pytest
 
-from c3 import consts, controldevice, rtlog
+from c3 import consts, controldevice, crc, rtlog
 from c3.core import C3
+
+
+def _ok_reply(session_id: int, req_nr: int, body: bytes = b"") -> bytes:
+    """Build a well-formed 0xC8 (OK) reply with a valid CRC, for mocking
+    `socket.recv()` in tests that write data (SETDATA/DELETEDATA don't
+    reply with a body, just an ack, but the header's session/req_nr and
+    the trailing CRC still have to be correct or `_receive()` rejects it)."""
+    msg = bytearray([0x01, 0xC8])
+    length = len(body) + 4
+    msg += bytes([length & 0xFF, (length >> 8) & 0xFF])
+    msg += bytes([session_id & 0xFF, (session_id >> 8) & 0xFF])
+    msg += bytes([req_nr & 0xFF, (req_nr >> 8) & 0xFF])
+    msg += body
+    checksum = crc.crc16(msg)
+    msg += bytes([checksum & 0xFF, (checksum >> 8) & 0xFF])
+    msg.insert(0, 0xAA)
+    msg.append(0x55)
+    return bytes(msg)
 
 
 @pytest.fixture
@@ -217,6 +235,108 @@ def test_core_get_device_data_user_bigdata(data_cfg_response_data):
         assert user_data[0]["Pin"] == 1
         assert user_data[1]["CardNo"] == 2222
         assert user_data[1]["Pin"] == 2
+
+
+def test_core_set_device_data_userauthorize(data_cfg_response_data):
+    """Expected bytes match a real ZKAccess 3.5 SETDATA write byte-for-byte
+    (captured granting Pin 2829 unrestricted access through door 2 - see
+    docs/c3-protokol-zapis.md in the grafickeprace.com/cipy repo)."""
+    with mock.patch("socket.socket") as mock_socket:
+        panel = C3("localhost")
+        mock_socket.return_value.send.return_value = 8
+        mock_socket.return_value.recv.side_effect = [
+            bytes.fromhex("aa00c80400"),
+            bytes.fromhex("4ac70100ee3d55"),
+            bytes.fromhex("aa01c80200"),
+            bytes.fromhex("4ac797c355"),
+        ]
+        assert panel.connect() is True
+
+        write_reply = _ok_reply(panel._session_id, panel._request_nr + 1)
+        mock_socket.return_value.recv.side_effect = [
+            bytes.fromhex("aa00c8b004"),
+            bytes.fromhex(data_cfg_response_data),
+            write_reply[:5],
+            write_reply[5:],
+        ]
+
+        panel.set_device_data(
+            "userauthorize",
+            {"Pin": 2829, "AuthorizeTimezoneId": 1, "AuthorizeDoorId": 2},
+        )
+
+        sent = mock_socket.return_value.send.call_args_list[-1].args[0]
+        # header(5) + session_id(2) + req_nr(2), then the actual payload, then crc(2) + end(1)
+        assert sent[9:-3].hex() == "020301020302" "0d0b" "01" "01" "01" "02"
+
+
+def test_core_delete_device_data_userauthorize_by_pin(data_cfg_response_data):
+    """Expected bytes match a real ZKAccess 3.5 DELETEDATA write byte-for-byte
+    (captured wiping all `userauthorize` rows for Pin 65537 before a full
+    rewrite of that person's access - see docs/c3-protokol-zapis.md)."""
+    with mock.patch("socket.socket") as mock_socket:
+        panel = C3("localhost")
+        mock_socket.return_value.send.return_value = 8
+        mock_socket.return_value.recv.side_effect = [
+            bytes.fromhex("aa00c80400"),
+            bytes.fromhex("4ac70100ee3d55"),
+            bytes.fromhex("aa01c80200"),
+            bytes.fromhex("4ac797c355"),
+        ]
+        assert panel.connect() is True
+
+        write_reply = _ok_reply(panel._session_id, panel._request_nr + 1)
+        mock_socket.return_value.recv.side_effect = [
+            bytes.fromhex("aa00c8b004"),
+            bytes.fromhex(data_cfg_response_data),
+            write_reply[:5],
+            write_reply[5:],
+        ]
+
+        panel.delete_device_data("userauthorize", {"Pin": 65537})
+
+        sent = mock_socket.return_value.send.call_args_list[-1].args[0]
+        assert sent[9:-3].hex() == "02010103" "010001"
+
+
+def test_core_set_device_data_unknown_table(data_cfg_response_data):
+    with mock.patch("socket.socket") as mock_socket:
+        panel = C3("localhost")
+        mock_socket.return_value.send.return_value = 8
+        mock_socket.return_value.recv.side_effect = [
+            bytes.fromhex("aa00c80400"),
+            bytes.fromhex("4ac70100ee3d55"),
+            bytes.fromhex("aa01c80200"),
+            bytes.fromhex("4ac797c355"),
+        ]
+        assert panel.connect() is True
+
+        mock_socket.return_value.recv.side_effect = [
+            bytes.fromhex("aa00c8b004"),
+            bytes.fromhex(data_cfg_response_data),
+        ]
+        with pytest.raises(ValueError, match="not available"):
+            panel.set_device_data("nosuchtable", {"Pin": 1})
+
+
+def test_core_delete_device_data_unknown_field(data_cfg_response_data):
+    with mock.patch("socket.socket") as mock_socket:
+        panel = C3("localhost")
+        mock_socket.return_value.send.return_value = 8
+        mock_socket.return_value.recv.side_effect = [
+            bytes.fromhex("aa00c80400"),
+            bytes.fromhex("4ac70100ee3d55"),
+            bytes.fromhex("aa01c80200"),
+            bytes.fromhex("4ac797c355"),
+        ]
+        assert panel.connect() is True
+
+        mock_socket.return_value.recv.side_effect = [
+            bytes.fromhex("aa00c8b004"),
+            bytes.fromhex(data_cfg_response_data),
+        ]
+        with pytest.raises(ValueError, match="Unknown field"):
+            panel.delete_device_data("userauthorize", {"NoSuchField": 1})
 
 
 def test_core_connect_response_incomplete():

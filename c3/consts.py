@@ -22,13 +22,27 @@ class Command(IntEnum):
     GETPARAM = 0x04
     CONTROL = 0x05
     DATATABLE_CFG = 0x06
+    SETDATA = 0x07
     GETDATA = 0x08
+    DELETEDATA = 0x09
     BIGDATA_CONTINUE = 0x0E
     BIGDATA_FREE = 0x0F
     RTLOG_BINARY = 0x0B
     DISCOVER = 0x14
     CONNECT_SESSION = 0x76
     RTLOG_KEYVALUE = 0x79
+
+
+# Sent by ZKAccess 3.5 once after a batch of SETDATA/DELETEDATA calls, with a
+# tiny fixed 2-byte body (b"\x01\x00" in every capture so far). The reply is a
+# little-endian uint32 that tracks some live row count (matched a per-panel
+# user/userauthorize count in every capture) - looks like a "how many rows do
+# you have now" query ZKAccess uses for its own UI, not a required commit:
+# SETDATA/DELETEDATA writes were confirmed to take effect immediately and
+# persist across a fresh connection without ever sending this. Not wired up
+# as a Command member since nothing here needs to send it; documented so a
+# future packet capture doesn't need to rediscover what 0x0A is.
+C3_COMMAND_UNKNOWN_0X0A = 0x0A
 
 
 C3_REPLY_OK = 0xC8

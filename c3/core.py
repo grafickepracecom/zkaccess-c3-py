@@ -756,6 +756,127 @@ class C3:
 
         return device_data
 
+    def set_device_data(self, table_name: str, values: dict[str, int | str]) -> None:
+        """Insert/update a row in a device data table (SETDATA).
+
+        `values` maps field name (per the table's DATATABLE_CFG schema,
+        same names `get_device_data` uses) to the value to write. Fields
+        left out are sent as empty (see `_encode_field_value`), which the
+        firmware treats as 0/blank, not "leave unchanged" - this call
+        always writes a full row, matching how ZKAccess itself always
+        sends every field of a table on a SETDATA (confirmed from packet
+        captures, not merely assumed).
+
+        Reverse-engineered from ZKAccess 3.5 <-> C3 packet captures (the
+        wire format isn't in any vendor doc); verified with real writes
+        (add/remove `userauthorize` rows) against a live C3-400 panel,
+        immediately confirmed by reading the row back with
+        `get_device_data`. Details, byte-level examples, and the
+        `user`/`userauthorize` field layouts are in
+        `docs/c3-protokol-zapis.md` in the grafickeprace.com/cipy repo
+        (not part of this repo - that's the app that uses this library).
+
+        Example - grant Pin 42 unrestricted (TimezoneId 1) access through
+        door 2 on this panel (`AuthorizeDoorId` is a per-panel door
+        bitmask, bit `N-1` for door number `N`):
+
+            panel.set_device_data("userauthorize", {
+                "Pin": 42, "AuthorizeTimezoneId": 1, "AuthorizeDoorId": 2,
+            })
+        """
+        self._send_device_data_write(consts.Command.SETDATA, table_name, values)
+
+    def delete_device_data(self, table_name: str, values: dict[str, int | str]) -> None:
+        """Delete row(s) matching `values` from a device data table
+        (DELETEDATA) - every field listed is matched by equality; fields
+        not listed are unconstrained.
+
+        **Every field you pass must have a real, non-empty value** -
+        `delete_device_data("userauthorize", {"Pin": 42, "AuthorizeTimezoneId": 1,
+        "AuthorizeDoorId": 0})` will not match any row even if a row with
+        `AuthorizeDoorId=0` doesn't exist, because 0 encodes as an empty
+        value the same as "field omitted" (see `_encode_field_value`) -
+        there is currently no way to explicitly match on the value zero.
+        This isn't a hypothetical edge case: it's exactly the bug in
+        ZKAccess 3.5 itself, which sends its per-door "remove this one
+        access profile" DELETEDATA with `AuthorizeDoorId` left empty
+        instead of set to the door being removed - confirmed against a
+        live panel to silently delete nothing. Don't reproduce that
+        mistake; always pass the real value for every field you match on.
+
+        To delete every row for a person on this panel regardless of
+        which door/timezone, pass only the key field, e.g.
+        `delete_device_data("userauthorize", {"Pin": 42})` - this is also
+        what ZKAccess itself does before a full rewrite of a person's
+        access (see `docs/c3-protokol-zapis.md`, "Dvě různé cesty zápisu
+        v ZKAccess UI").
+        """
+        self._send_device_data_write(consts.Command.DELETEDATA, table_name, values)
+
+    def _send_device_data_write(
+        self, command: consts.Command, table_name: str, values: dict[str, int | str]
+    ) -> None:
+        if not self.is_connected():
+            raise ConnectionError("No connection to C3 panel.")
+
+        data_cfg = self._get_device_data_cfg()
+        cfg = next((c for c in data_cfg if c.name == table_name), None)
+        if not cfg:
+            raise ValueError(
+                "Table '%s' is not available, use one of: %s"
+                % (table_name, ",".join([cfg.name for cfg in data_cfg]))
+            )
+
+        fields_by_name = {f.name: f for f in cfg.fields}
+        unknown_fields = [name for name in values if name not in fields_by_name]
+        if unknown_fields:
+            raise ValueError(
+                "Unknown field(s) for table '%s': %s (choose from %s)"
+                % (
+                    table_name,
+                    ",".join(unknown_fields),
+                    ",".join(f.name for f in cfg.fields),
+                )
+            )
+
+        # Field order on the wire follows ascending field index, matching
+        # every ZKAccess-generated write seen in packet captures - untested
+        # whether the panel actually requires this order or just tolerates
+        # it, so keep it rather than assume it doesn't matter.
+        ordered = sorted(
+            ((fields_by_name[name].index, name) for name in values),
+            key=lambda pair: pair[0],
+        )
+
+        payload = bytearray([cfg.index, len(ordered)])
+        payload.extend(index for index, _ in ordered)
+        for _, name in ordered:
+            value_bytes = self._encode_field_value(values[name])
+            payload.append(len(value_bytes))
+            payload.extend(value_bytes)
+
+        self._send_receive(command, list(payload))
+
+    @staticmethod
+    def _encode_field_value(value: int | str) -> bytes:
+        """Encode one field's value for SETDATA/DELETEDATA.
+
+        Integers use the same variable-length little-endian encoding
+        `get_device_data` decodes replies with (`field_size` byte +
+        that many bytes) - 0 encodes as zero bytes, since it needs none
+        to be represented; there is no way to distinguish "value 0" from
+        "omitted" on the wire (see the `delete_device_data` docstring for
+        why that matters). String fields haven't been exercised against a
+        real panel - `user.Name`/`user.Password` were always sent empty
+        in every capture available while reverse-engineering this - so
+        ASCII encoding here is a reasonable guess, not a verified one.
+        """
+        if isinstance(value, str):
+            return value.encode("ascii")
+        if not value:
+            return b""
+        return value.to_bytes((value.bit_length() + 7) // 8, "little")
+
     def _update_inout_status(self, logs: list[rtlog.RTLogRecord]):
         for log in logs:
             if isinstance(log, rtlog.DoorAlarmStatusRecord):
