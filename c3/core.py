@@ -283,8 +283,10 @@ class C3:
 
         Triggered when a reply's command is C3_REPLY_BIGDATA_PREPARE instead
         of the usual C3_REPLY_OK: `prepare_body` then carries the total
-        transfer size (little-endian uint16 at offset 1) instead of actual
-        data. The full payload is fetched by repeatedly sending
+        transfer size (little-endian uint32 at offset 1; originally decoded
+        as uint16, which happened to work for tables under 64 KB and broke
+        on the first read of a full `transaction` table - 400+ KB) instead
+        of actual data. The full payload is fetched by repeatedly sending
         BIGDATA_CONTINUE with a 4-byte cursor (bytes received so far, as
         little-endian uint32), until that total is reached, and closed out
         with a BIGDATA_FREE command. Each BIGDATA_CONTINUE reply echoes the
@@ -295,7 +297,7 @@ class C3:
         derived from any official protocol documentation, since none is
         publicly available for this mechanism.
         """
-        total_size = int.from_bytes(prepare_body[1:3], "little")
+        total_size = int.from_bytes(prepare_body[1:5], "little")
         session_offset = 0 if self._session_less else 4
         received = bytearray()
 
