@@ -773,10 +773,7 @@ class C3:
         wire format isn't in any vendor doc); verified with real writes
         (add/remove `userauthorize` rows) against a live C3-400 panel,
         immediately confirmed by reading the row back with
-        `get_device_data`. Details, byte-level examples, and the
-        `user`/`userauthorize` field layouts are in
-        `docs/c3-protokol-zapis.md` in the grafickeprace.com/cipy repo
-        (not part of this repo - that's the app that uses this library).
+        `get_device_data`.
 
         Example - grant Pin 42 unrestricted (TimezoneId 1) access through
         door 2 on this panel (`AuthorizeDoorId` is a per-panel door
@@ -810,8 +807,7 @@ class C3:
         which door/timezone, pass only the key field, e.g.
         `delete_device_data("userauthorize", {"Pin": 42})` - this is also
         what ZKAccess itself does before a full rewrite of a person's
-        access (see `docs/c3-protokol-zapis.md`, "Dvě různé cesty zápisu
-        v ZKAccess UI").
+        access.
         """
         self._send_device_data_write(consts.Command.DELETEDATA, table_name, values)
 

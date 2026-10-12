@@ -49,7 +49,7 @@ C3_REPLY_OK = 0xC8
 C3_REPLY_ERROR = 0xC9
 # Reply to GETDATA (and presumably other read commands) when the requested
 # data does not fit in a single reply. Instead of the data itself, the body
-# carries the total transfer size (uint16, little-endian, at offset 1);
+# carries the total transfer size (uint32, little-endian, at offset 1);
 # the client must then fetch it in chunks using BIGDATA_CONTINUE/BIGDATA_FREE.
 # Reverse-engineered from a ZKAccess 3.5 <-> C3 packet capture; the DLLs
 # shipped with the official PULL SDK reference this mechanism by name
